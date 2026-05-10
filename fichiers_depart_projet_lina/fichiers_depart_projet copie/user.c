@@ -1,48 +1,48 @@
 #include "user.h"
 #include <stdlib.h>
-#include <string.h>
 #include <stdio.h>
-#include <sys/socket.h>
 
-/** accepter une connection TCP depuis la socket d'écoute sl et retourner un
- * pointeur vers un struct user, dynamiquement alloué et convenablement
- * initialisé */
-struct user *user_accept(int sl)
-{
-	struct user *user= malloc(sizeof(struct user));
-	if(user==NULL){
-		perror("malloc user");
-		exit(1);
-	}
-	user->address=malloc(sizeof(struct sockaddr ));
-	if(user->address==NULL){
-		perror("malloc address");
-		exit(1);
-	}
+/** * Accepter une connection TCP depuis la socket d'écoute sl et retourner un
+ * pointeur vers un struct user, dynamiquement alloué et convenablement initialisé 
+ */
+struct user *user_accept(int sl) {
+    /* Allocation dynamique de la structure */
+    struct user *u = malloc(sizeof(struct user));
+    if (u == NULL) {
+        perror("malloc struct user");
+        return NULL;
+    }
 
-	user->addr_len = sizeof(struct sockaddr);
+    /* Allocation dynamique de la structure d'adresse (pour IPv4 ici) */
+    u->address = malloc(sizeof(struct sockaddr_in));
+    if (u->address == NULL) {
+        perror("malloc sockaddr");
+        free(u);
+        return NULL;
+    }
+    
+    u->addr_len = sizeof(struct sockaddr_in);
 
-	user->sock=accept(sl, user->address, &user->addr_len);
-	if((user->sock)<0){
-		perror("accept");
-		free(user->address);
-		free(user);
-		return NULL;
-	}
+    /* Appel système accept pour bloquer jusqu'à la connexion d'un client */
+    u->sock = accept(sl, u->address, &u->addr_len);
+    if (u->sock < 0) {
+        perror("accept");
+        free(u->address);
+        free(u);
+        return NULL;
+    }
 
-	return user;
+    return u;
 }
 
-/** libérer toute la mémoire associée à user */
-void user_free(void *usr)
-{
-	struct user *user= (struct user *)usr;
-	if (user == NULL) return;
-	free(user->address);
-	free(user);
+/** * Libérer toute la mémoire associée à user 
+ */
+void user_free(void *usr) {
+    struct user *u = (struct user *)usr;
+    if (u != NULL) {
+        if (u->address != NULL) {
+            free(u->address);
+        }
+        free(u);
+    }
 }
-
-void print_user(const void *usr) {
-    const struct user *u = (const struct user *)usr;
-    printf("User: sock=%d\n", u->sock);
-} /* fonction pour utiliser list_print et afficher les different sock des users*/
