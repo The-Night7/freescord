@@ -8,11 +8,13 @@ Ce travail a été réalisé intégralement par un être humain. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <poll.h>
 
 #define PORT_FREESCORD 4321
 
-/** * Se connecter au serveur TCP d'adresse donnée en argument et au port donné
- * retourne le descripteur de fichier de la socket obtenue ou -1 en cas d'erreur. 
+/**
+ * Se connecter au serveur TCP d'adresse donnée en argument et au port donné
+ * retourne le descripteur de fichier de la socket obtenue ou -1 en cas d'erreur.
  */
 int connect_serveur_tcp(char *adresse, uint16_t port) {
     /* 1. Création de la socket */
@@ -23,14 +25,14 @@ int connect_serveur_tcp(char *adresse, uint16_t port) {
     }
 
     /* 2. Configuration de l'adresse de destination */
-    struct sockaddr_in sa = { 
-        .sin_family = AF_INET, 
-        .sin_port = htons(port) 
+    struct sockaddr_in sa = {
+        .sin_family = AF_INET,
+        .sin_port = htons(port)
     };
-    
+
     /* Conversion de l'adresse textuelle en format binaire réseau */
     if (inet_pton(AF_INET, adresse, &sa.sin_addr) != 1) {
-        fprintf(stderr, "Adresse IP invalide : %s\n", adresse);
+        fprintf(stderr, "Adresse invalide\n");
         close(fd);
         return -1;
     }
@@ -51,44 +53,65 @@ int main(int argc, char *argv[]) {
 
     /* 4. Se connecter au serveur dont l'adresse IP est donnée comme argument */
     sc = connect_serveur_tcp(adresse_serveur, PORT_FREESCORD);
-    if (sc < 0) {
-        fprintf(stderr, "Impossible de se connecter au serveur %s:%d\n", adresse_serveur, PORT_FREESCORD);
+    if (sc < 0)
         return 1;
-    }
 
-    printf("Connecté au serveur. Entrez votre texte (Ctrl-D pour quitter) :\n");
+    printf("Connecté au chat ! Entrez vos messages (Ctrl-D pour quitter) :\n");
+
+    /* a) Préparation du tableau pollfd */
+    /* fds[0] surveille l'entrée standard (clavier) */
+    /* fds[1] surveille la socket connectée au serveur */
+    struct pollfd fds[2] = {
+        { .fd = 0,  .events = POLLIN },
+        { .fd = sc, .events = POLLIN }
+    };
 
     char buf[512];
     ssize_t lus;
 
-    /* 5. Boucle principale du client */
-    /* On lit sur l'entrée standard (descripteur 0) */
-    while ((lus = read(0, buf, sizeof(buf))) > 0) {
-        
-        /* Envoyer cette ligne au serveur */
-        if (write(sc, buf, lus) != lus) {
-            perror("Erreur d'envoi au serveur");
+    for (;;) {
+        /* Bloque jusqu'à ce qu'au moins un descripteur soit prêt à être lu */
+        int pll = poll(fds, 2, -1);
+        if (pll < 0) {
+            perror("poll");
             break;
         }
 
-        /* Lire la réponse du serveur (qui devrait être la même chose) */
-        ssize_t reponse = read(sc, buf, sizeof(buf));
-        if (reponse > 0) {
-            /* La recopier sur le terminal (descripteur 1) */
-            write(1, buf, reponse);
-        } else if (reponse == 0) {
-            printf("\nLe serveur a fermé la connexion de son côté.\n");
-            break;
-        } else {
-            perror("Erreur de lecture depuis le serveur");
+        /* b) Vérification de l'entrée standard (clavier) */
+        if (fds[0].revents & POLLIN) {
+            lus = read(0, buf, sizeof(buf));
+            if (lus > 0) {
+                if (write(sc, buf, lus) != lus) {
+                    perror("write au serveur");
+                    break;
+                }
+            } else if (lus == 0) {
+                /* L'utilisateur a fait Ctrl-D */
+                printf("\nDéconnexion...\n");
+                break;
+            }
+        }
+
+        /* c) Vérification de la socket du serveur (messages entrants) */
+        if (fds[1].revents & POLLIN) {
+            lus = read(sc, buf, sizeof(buf));
+            if (lus > 0) {
+                if (write(1, buf, lus) != lus) {
+                    perror("write sur le terminal");
+                    break;
+                }
+            } else if (lus == 0) {
+                /* Le serveur a fermé la connexion */
+                printf("\nLe serveur a fermé la connexion.\n");
+                break;
+            }
+        }
+
+        /* Gestion des erreurs de connexion inattendues */
+        if (fds[1].revents & (POLLERR | POLLHUP)) {
+            printf("\nErreur critique sur la socket.\n");
             break;
         }
-    }
-
-    /* 6. Lorsque l'utilisateur met fin à l'entrée avec Ctrl-D (lus == 0), 
-       le client sort de la boucle, ferme sa socket et prend fin */
-    if (lus == 0) {
-         printf("\nDéconnexion...\n");
     }
 
     close(sc);
