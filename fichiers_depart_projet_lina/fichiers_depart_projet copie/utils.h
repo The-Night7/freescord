@@ -1,3 +1,7 @@
+/* Myriam Bensaid 22504229
+Je déclare qu'il s'agit de mon propre travail.
+Ce travail a été réalisé intégralement par un être humain. */
+
 #ifndef UTILS_H
 #define UTILS_H value
 
