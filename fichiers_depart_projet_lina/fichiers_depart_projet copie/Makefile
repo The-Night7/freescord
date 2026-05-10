@@ -1,7 +1,8 @@
 CC = gcc
 CFLAGS = -g -Wall -Wvla -std=c99 -pthread -D_XOPEN_SOURCE=700
 LDFLAGS = -pthread -Wall
-EXE = srv clt
+SDLFLAGS = -lSDL2 -lSDL2_ttf
+EXE = srv clt gui
 TEST = list/test_list
 
 all: $(EXE)
@@ -12,10 +13,14 @@ srv: serveur.o list/list.o user.o buffer/buffer.o utils.o
 clt: client.o buffer/buffer.o utils.o
 	$(CC) $(LDFLAGS) $^ -o $@
 
+gui: client_gui.c
+	$(CC) $(SDLFLAGS) $^ -o $@
+
 client.o: client.c
 serveur.o: serveur.c list/list.h
 user.o: user.c user.h
 utils.o: utils.c utils.h
+client_gui.o: client_gui.c
 
 list/list.o: list/list.c list/list.h
 list/test_list.o: list/test_list.c list/list.h
