@@ -6,7 +6,9 @@
 #include <string.h>
 #include <pthread.h>
 #include "user.h"
-#include "list/list.h" /* Ajout de la bibliothèque de listes */
+#include "utils.h"
+#include "list/list.h"
+#include "buffer/buffer.h" /* Ajout du buffer de l'exercice 5 */
 
 #define PORT_FREESCORD 4321
 
@@ -16,7 +18,6 @@ struct list *clts_connecte;      /* La liste des clients actuellement connectés
 pthread_mutex_t verrou_liste;    /* Mutex pour protéger l'accès à la liste */
 
 int create_listening_sock(uint16_t port) {
-    /* [Code inchangé de l'exercice 2] */
     int sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) { perror("socket"); return -1; }
 
@@ -60,27 +61,91 @@ void *repeteur(void *lst) {
     return NULL;
 }
 
+/**
+ * Thread client : gère l'authentification puis le chat
+ * C'est lui qui ajoute le client à la liste (après validation du pseudo)
+ */
 void *handle_client(void *usr) {
     struct user *client = (struct user *)usr;
     char buf[512];
-    ssize_t lus;
 
-    printf("[Thread] Client connecté (Socket: %d)\n", client->sock);
+    /* On utilise notre super buffer créé à l'exercice 5 ! */
+    buffer *b = buff_create(client->sock, 1024);
 
-    /* d) Au lieu de renvoyer au client, on écrit dans l'entrée du tube (tube[1]) */
-    while ((lus = read(client->sock, buf, sizeof(buf))) > 0) {
-        if (write(tube[1], buf, lus) != lus) {
-            perror("Erreur d'écriture dans le tube");
-            break;
+    /* 1. Message de bienvenue du protocole */
+    char *welcome = "Bienvenue sur le serveur Freescord !\r\n"
+                    "Entrez votre pseudonyme avec 'nickname <votre_pseudo>'\r\n\r\n";
+    write(client->sock, welcome, strlen(welcome));
+
+    int nick_ok = 0;
+
+    /* 2. Boucle d'authentification */
+    while (!nick_ok && buff_fgets_crlf(b, buf, sizeof(buf))) {
+        /* Nettoyage du CRLF pour faciliter les comparaisons */
+        crlf_to_lf(buf);
+        char *newline = strchr(buf, '\n');
+        if (newline) *newline = '\0';
+
+        /* Code 3 : Vérifie si la commande commence bien par "nickname " */
+        if (strncmp(buf, "nickname ", 9) != 0) {
+            write(client->sock, "3 \r\n", 4);
+            continue;
+        }
+
+        char *pseudo = buf + 9;
+
+        /* Code 2 : Vérifie les règles (max 16 chars, pas d'espace) */
+        if (strlen(pseudo) > 16 || strchr(pseudo, ' ') != NULL) {
+            write(client->sock, "2 \r\n", 4);
+            continue;
+        }
+
+        /* Code 1 : Vérifie si le nom est déjà pris (protection avec mutex) */
+        pthread_mutex_lock(&verrou_liste);
+        int pris = 0;
+        for (size_t i = 0; i < list_length(clts_connecte); i++) {
+            struct user *u = (struct user *)list_get(clts_connecte, i);
+            if (strcmp(u->nickname, pseudo) == 0) {
+                pris = 1;
+                break;
+            }
+        }
+
+        if (pris) {
+            pthread_mutex_unlock(&verrou_liste);
+            write(client->sock, "1 \r\n", 4);
+        } else {
+            /* Code 0 : Succès ! On enregistre le pseudo et on ajoute à la liste */
+            strcpy(client->nickname, pseudo);
+            list_add(clts_connecte, client);
+            pthread_mutex_unlock(&verrou_liste);
+            write(client->sock, "0 \r\n", 4);
+            nick_ok = 1; /* Sortie de la boucle d'authentification */
         }
     }
 
-    /* Gestion de la déconnexion */
-    pthread_mutex_lock(&verrou_liste);
-    list_remove_element(clts_connecte, client); /* On retire le client de la liste */
-    pthread_mutex_unlock(&verrou_liste);
+    /* 3. Phase de messagerie normale (Chat room) */
+    if (nick_ok) {
+        printf("Nouvel utilisateur en ligne : %s\n", client->nickname);
+        char message_diffuse[600];
 
-    printf("[Thread] Client déconnecté (Socket: %d)\n", client->sock);
+        /* On lit les messages normaux du client */
+        while (buff_fgets_crlf(b, buf, sizeof(buf))) {
+            /* On prépare la ligne préfixée : "pseudo> message" */
+            snprintf(message_diffuse, sizeof(message_diffuse), "%s> %s", client->nickname, buf);
+            /* Envoi au répéteur (qui diffusera à tout le monde) */
+            write(tube[1], message_diffuse, strlen(message_diffuse));
+        }
+
+        /* Déconnexion : on retire l'utilisateur de la liste publique */
+        pthread_mutex_lock(&verrou_liste);
+        list_remove_element(clts_connecte, client);
+        pthread_mutex_unlock(&verrou_liste);
+
+        printf("Déconnexion : %s\n", client->nickname);
+    }
+
+    buff_free(b);
     close(client->sock);
     user_free(client);
     return NULL;
@@ -114,18 +179,11 @@ int main() {
         struct user *client = user_accept(listensc);
         if (client == NULL) continue;
 
-        /* Ajout du client à la liste (toujours protéger avec le mutex) */
-        pthread_mutex_lock(&verrou_liste);
-        list_add(clts_connecte, client);
-        pthread_mutex_unlock(&verrou_liste);
-
+        /* Plus de list_add ici : c'est handle_client qui s'en chargera
+           après validation du pseudo ! */
         pthread_t th;
         if (pthread_create(&th, NULL, handle_client, client) != 0) {
             perror("pthread_create client");
-            /* Nettoyage si échec de création du thread */
-            pthread_mutex_lock(&verrou_liste);
-            list_remove_element(clts_connecte, client);
-            pthread_mutex_unlock(&verrou_liste);
             close(client->sock);
             user_free(client);
             continue;
