@@ -5,6 +5,7 @@ Ce travail a été réalisé intégralement par un être humain. */
 #include <unistd.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <netdb.h>         /* Pour getaddrinfo */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,29 +13,40 @@ Ce travail a été réalisé intégralement par un être humain. */
 #include "buffer/buffer.h" /* Inclusion de notre bibliothèque buffer */
 #include "utils.h"         /* Inclusion de crlf_to_lf et lf_to_crlf */
 
-#define PORT_FREESCORD 4321
+#define PORT_FREESCORD "4321"
 
-int connect_serveur_tcp(char *adresse, uint16_t port)
+/**
+ * Se connecter au serveur (compatible IPv4, IPv6 et Noms de Domaine)
+ */
+int connect_serveur_tcp(char *adresse, const char *port)
 {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) {
-        perror("socket");
-        exit(1);
+    struct addrinfo hints, *res, *p;
+    int fd;
+
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family   = AF_UNSPEC;     /* IPv4 ou IPv6 */
+    hints.ai_socktype = SOCK_STREAM;   /* TCP */
+
+    /* La magie de getaddrinfo : elle résout les IP et les noms de domaine (ex: google.com, localhost) */
+    if (getaddrinfo(adresse, port, &hints, &res) != 0) {
+        fprintf(stderr, "Adresse IP ou nom de domaine invalide\n");
+        return -1;
     }
 
-    struct sockaddr_in sa = { .sin_family = AF_INET, .sin_port = htons(port) };
-
-    if (inet_pton(AF_INET, adresse, &sa.sin_addr) != 1) {
-        perror("Adresse invalide");
+    for (p = res; p != NULL; p = p->ai_next) {
+        fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (fd < 0) continue;
+        if (connect(fd, p->ai_addr, p->ai_addrlen) == 0) {
+            break; /* Connexion réussie ! */
+        }
         close(fd);
-        exit(3);
     }
 
-    socklen_t sl = sizeof(sa);
-    if (connect(fd, (struct sockaddr *) &sa, sl) < 0) {
+    freeaddrinfo(res);
+
+    if (p == NULL) {
         perror("connect");
-        close(fd);
-        exit(3);
+        return -1;
     }
 
     return fd;
@@ -45,7 +57,7 @@ int main(int argc, char *argv[])
     int sc;
 
     if (argc < 2) {
-        sc = connect_serveur_tcp("127.0.0.1", PORT_FREESCORD);
+        sc = connect_serveur_tcp("localhost", PORT_FREESCORD); /* Support de 'localhost' ! */
     } else {
         sc = connect_serveur_tcp(argv[1], PORT_FREESCORD);
     }

@@ -1,6 +1,6 @@
 #include <unistd.h>
 #include <sys/socket.h>
-#include <arpa/inet.h>
+#include <netdb.h>          /* Remplaçant de arpa/inet.h pour getaddrinfo */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,26 +8,50 @@
 #include "user.h"
 #include "utils.h"
 #include "list/list.h"
-#include "buffer/buffer.h" /* Ajout du buffer de l'exercice 5 */
+#include "buffer/buffer.h"
 
-#define PORT_FREESCORD 4321
+#define PORT_FREESCORD "4321" /* Changé en chaîne de caractères pour getaddrinfo */
 
 /* Variables globales pour le broadcast */
-int tube[2];                     /* Le tube de communication inter-threads */
-struct list *clts_connecte;      /* La liste des clients actuellement connectés */
-pthread_mutex_t verrou_liste;    /* Mutex pour protéger l'accès à la liste */
+int tube[2];                    /* Le tube de communication inter-threads */
+struct list *clts_connecte;     /* La liste des clients actuellement connectés */
+pthread_mutex_t verrou_liste;   /* Mutex pour protéger l'accès à la liste */
 
-int create_listening_sock(uint16_t port) {
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sockfd < 0) { perror("socket"); return -1; }
+/**
+ * Créer et configurer une socket d'écoute compatible IPv4 et IPv6
+ */
+int create_listening_sock(const char *port) {
+    struct addrinfo hints, *res, *p;
+    int sockfd;
 
-    struct sockaddr_in sa = { .sin_family = AF_INET, .sin_port = htons(port), .sin_addr.s_addr = htonl(INADDR_ANY) };
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family   = AF_UNSPEC;     /* Accepte IPv4 ou IPv6 */
+    hints.ai_socktype = SOCK_STREAM;   /* TCP */
+    hints.ai_flags    = AI_PASSIVE;    /* Utiliser l'IP de la machine locale */
 
-    int opt = 1;
-    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(int));
+    /* Résolution de l'adresse */
+    if (getaddrinfo(NULL, port, &hints, &res) != 0) {
+        perror("getaddrinfo"); return -1;
+    }
 
-    if (bind(sockfd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        perror("bind"); close(sockfd); return -1;
+    /* On parcourt les résultats jusqu'à réussir à "bind" */
+    for (p = res; p != NULL; p = p->ai_next) {
+        sockfd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        if (sockfd < 0) continue;
+
+        int opt = 1;
+        setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(int));
+
+        if (bind(sockfd, p->ai_addr, p->ai_addrlen) == 0) {
+            break; /* Succès ! */
+        }
+        close(sockfd);
+    }
+
+    freeaddrinfo(res); /* Libération de la mémoire allouée par getaddrinfo */
+
+    if (p == NULL) {
+        fprintf(stderr, "Échec du bind sur toutes les adresses\n"); return -1;
     }
 
     if (listen(sockfd, 128) < 0) {
@@ -41,7 +65,7 @@ int create_listening_sock(uint16_t port) {
  * Thread Répéteur : Lit dans le tube et diffuse à tous les clients
  */
 void *repeteur(void *lst) {
-    struct list *l = (struct list*) lst;
+    struct list *l = (struct list *)lst;
     char buf[512];
     ssize_t n;
 
@@ -62,19 +86,16 @@ void *repeteur(void *lst) {
 }
 
 /**
- * Thread client : gère l'authentification puis le chat
- * C'est lui qui ajoute le client à la liste (après validation du pseudo)
+ * Thread client : gère l'authentification puis le chat avec système de commandes
  */
 void *handle_client(void *usr) {
     struct user *client = (struct user *)usr;
     char buf[512];
 
-    /* On utilise notre super buffer créé à l'exercice 5 ! */
     buffer *b = buff_create(client->sock, 1024);
 
     /* 1. Message de bienvenue du protocole */
-    char *welcome = "Bienvenue sur le serveur Freescord !\r\n"
-                    "Entrez votre pseudonyme avec 'nickname <votre_pseudo>'\r\n\r\n";
+    char *welcome = "Bienvenue ! Commandes: 'nickname <pseudo>', 'msg <texte>', 'list', 'whisper <pseudo> <texte>'\r\n\r\n";
     write(client->sock, welcome, strlen(welcome));
 
     int nick_ok = 0;
@@ -124,17 +145,65 @@ void *handle_client(void *usr) {
         }
     }
 
-    /* 3. Phase de messagerie normale (Chat room) */
+    /* 3. Phase de discussion avec le système de commandes */
     if (nick_ok) {
-        printf("Nouvel utilisateur en ligne : %s\n", client->nickname);
+        printf("Connexion : %s\n", client->nickname);
         char message_diffuse[600];
 
-        /* On lit les messages normaux du client */
         while (buff_fgets_crlf(b, buf, sizeof(buf))) {
-            /* On prépare la ligne préfixée : "pseudo> message" */
-            snprintf(message_diffuse, sizeof(message_diffuse), "%s> %s", client->nickname, buf);
-            /* Envoi au répéteur (qui diffusera à tout le monde) */
-            write(tube[1], message_diffuse, strlen(message_diffuse));
+            crlf_to_lf(buf);
+            char *newline = strchr(buf, '\n');
+            if (newline) *newline = '\0';
+
+            /* Commande : list (afficher les utilisateurs connectés) */
+            if (strcmp(buf, "list") == 0) {
+                char rep[1024] = "list ";
+                pthread_mutex_lock(&verrou_liste);
+                for (size_t i = 0; i < list_length(clts_connecte); i++) {
+                    strcat(rep, ((struct user *)list_get(clts_connecte, i))->nickname);
+                    strcat(rep, " ");
+                }
+                pthread_mutex_unlock(&verrou_liste);
+                strcat(rep, "\r\n");
+                write(client->sock, rep, strlen(rep));
+            }
+            /* Commande : msg (message public diffusé à tous) */
+            else if (strncmp(buf, "msg ", 4) == 0) {
+                snprintf(message_diffuse, sizeof(message_diffuse),
+                         "msg %s> %s\r\n", client->nickname, buf + 4);
+                write(tube[1], message_diffuse, strlen(message_diffuse));
+            }
+            /* Commande : whisper (message privé) */
+            else if (strncmp(buf, "whisper ", 8) == 0) {
+                char *target = buf + 8;
+                char *space = strchr(target, ' ');
+                if (space) {
+                    *space = '\0'; /* Sépare le pseudo du reste du message */
+                    char *priv_msg = space + 1;
+                    char message_prive[600];
+                    snprintf(message_prive, sizeof(message_prive),
+                             "whisper %s> %s\r\n", client->nickname, priv_msg);
+                    pthread_mutex_lock(&verrou_liste);
+                    int found = 0;
+                    for (size_t i = 0; i < list_length(clts_connecte); i++) {
+                        struct user *u = (struct user *)list_get(clts_connecte, i);
+                        if (strcmp(u->nickname, target) == 0) {
+                            write(u->sock, message_prive, strlen(message_prive));
+                            found = 1;
+                            break;
+                        }
+                    }
+                    pthread_mutex_unlock(&verrou_liste);
+                    if (!found)
+                        write(client->sock, "erreur Utilisateur introuvable\r\n", 32);
+                } else {
+                    write(client->sock, "erreur Format: whisper <pseudo> <message>\r\n", 43);
+                }
+            }
+            /* Commande inconnue */
+            else {
+                write(client->sock, "erreur Commande inconnue (utilisez msg, list, whisper)\r\n", 56);
+            }
         }
 
         /* Déconnexion : on retire l'utilisateur de la liste publique */
@@ -173,14 +242,12 @@ int main() {
     }
     pthread_detach(th_rep);
 
-    printf("Serveur de Chat en écoute sur le port %d...\n", PORT_FREESCORD);
+    printf("Serveur de Chat en écoute sur le port %s...\n", PORT_FREESCORD);
 
     for (;;) {
         struct user *client = user_accept(listensc);
         if (client == NULL) continue;
 
-        /* Plus de list_add ici : c'est handle_client qui s'en chargera
-           après validation du pseudo ! */
         pthread_t th;
         if (pthread_create(&th, NULL, handle_client, client) != 0) {
             perror("pthread_create client");
