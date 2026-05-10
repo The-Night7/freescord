@@ -1,111 +1,96 @@
+/* Myriam Bensaid 22504229
+Je déclare qu'il s'agit de mon propre travail.
+Ce travail a été réalisé intégralement par un être humain. */
+
 #include <unistd.h>
 #include <sys/socket.h>
-#include <fcntl.h>
-#include <pthread.h>
 #include <arpa/inet.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <poll.h>
-#include "buffer/buffer.h"
-#include "utils.h"
+#include <string.h>
 
 #define PORT_FREESCORD 4321
 
-/** se connecter au serveur TCP d'adresse donnée en argument sous forme de
- * chaîne de caractère et au port donné en argument
- * retourne le descripteur de fichier de la socket obtenue ou -1 en cas
- * d'erreur. */
-int connect_serveur_tcp(char *adresse, uint16_t port);
+/** * Se connecter au serveur TCP d'adresse donnée en argument et au port donné
+ * retourne le descripteur de fichier de la socket obtenue ou -1 en cas d'erreur. 
+ */
+int connect_serveur_tcp(char *adresse, uint16_t port) {
+    /* 1. Création de la socket */
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) {
+        perror("socket");
+        return -1;
+    }
 
-int main(int argc, char *argv[])
-{
-	int sc;
-	if (argc < 2) {
-		sc=connect_serveur_tcp("127.0.0.1", PORT_FREESCORD);
-	} 
-	else {
-		sc=connect_serveur_tcp(argv[1], PORT_FREESCORD);
-	}
-	
-	if (sc < 0) {
-		fprintf(stderr, "Erreur connect_serveur_tcp\n");
-		return 1;
-	}
-	
-	struct pollfd fds[2] = {{ .fd = 0, .events = POLLIN }, { .fd = sc, .events = POLLIN }}; 
-	ssize_t mess;
-	char buf[256];
+    /* 2. Configuration de l'adresse de destination */
+    struct sockaddr_in sa = { 
+        .sin_family = AF_INET, 
+        .sin_port = htons(port) 
+    };
+    
+    /* Conversion de l'adresse textuelle en format binaire réseau */
+    if (inet_pton(AF_INET, adresse, &sa.sin_addr) != 1) {
+        fprintf(stderr, "Adresse IP invalide : %s\n", adresse);
+        close(fd);
+        return -1;
+    }
 
-	for(;;){
+    /* 3. Demande de connexion au serveur */
+    if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+        perror("connect");
+        close(fd);
+        return -1;
+    }
 
-		int pll=poll(fds, 2, -1);
-		if(pll<0){
-			perror("pool");
-			break;
-		}
-
-		if (fds[0].revents & (POLLIN| POLLHUP)) {
-			mess = read(0, buf, sizeof(buf));
-			if (mess > 0) {
-				if (write(sc, buf, mess) != mess) {
-					perror("write");
-					break;
-				}
-			} else if (mess==0) {
-					printf("Serveur deconnecté\n");
-					break;
-			}else{
-				perror("read");
-				break;
-			}
-
-			} 
-
-		if (fds[1].revents & (POLLIN| POLLHUP)) {
-			mess = read(sc, buf, sizeof(buf));
-			if (mess > 0) {
-				if (write(1, buf, mess) != mess) {
-					perror("write");
-					break;
-				}
-			} else if (mess==0) {
-					printf("Serveur deconnecté\n");
-					break;
-			}else{
-				perror("read");
-				break;
-			}
-
-			}
-			if (fds[1].revents & POLLERR) {
-			printf("Erreur sur la socket\n");
-			break;
-		} 
-
-	}
-	close(sc);
-	return 0;
+    return fd;
 }
 
-int connect_serveur_tcp(char *adresse, uint16_t port)
-{
-	int fd = socket(AF_INET, SOCK_STREAM, 0);
-	if(fd<0){
-		perror("socket");
-		exit(1);
-	}
-	struct sockaddr_in sa = { .sin_family = AF_INET, .sin_port = htons(port) };
-	if(inet_pton(AF_INET, adresse, &sa.sin_addr) != 1){
-		perror("Adresse invalide");
-		close(fd);
-		exit(3);
-	}
-	socklen_t sl= sizeof(sa);
-	if (connect(fd, (struct sockaddr *) &sa, sl) < 0) {
-       perror("connect");
-	   close(fd);
-		exit(3);
-	}
+int main(int argc, char *argv[]) {
+    int sc;
+    char *adresse_serveur = (argc < 2) ? "127.0.0.1" : argv[1];
 
-	return fd;
+    /* 4. Se connecter au serveur dont l'adresse IP est donnée comme argument */
+    sc = connect_serveur_tcp(adresse_serveur, PORT_FREESCORD);
+    if (sc < 0) {
+        fprintf(stderr, "Impossible de se connecter au serveur %s:%d\n", adresse_serveur, PORT_FREESCORD);
+        return 1;
+    }
+
+    printf("Connecté au serveur. Entrez votre texte (Ctrl-D pour quitter) :\n");
+
+    char buf[512];
+    ssize_t lus;
+
+    /* 5. Boucle principale du client */
+    /* On lit sur l'entrée standard (descripteur 0) */
+    while ((lus = read(0, buf, sizeof(buf))) > 0) {
+        
+        /* Envoyer cette ligne au serveur */
+        if (write(sc, buf, lus) != lus) {
+            perror("Erreur d'envoi au serveur");
+            break;
+        }
+
+        /* Lire la réponse du serveur (qui devrait être la même chose) */
+        ssize_t reponse = read(sc, buf, sizeof(buf));
+        if (reponse > 0) {
+            /* La recopier sur le terminal (descripteur 1) */
+            write(1, buf, reponse);
+        } else if (reponse == 0) {
+            printf("\nLe serveur a fermé la connexion de son côté.\n");
+            break;
+        } else {
+            perror("Erreur de lecture depuis le serveur");
+            break;
+        }
+    }
+
+    /* 6. Lorsque l'utilisateur met fin à l'entrée avec Ctrl-D (lus == 0), 
+       le client sort de la boucle, ferme sa socket et prend fin */
+    if (lus == 0) {
+         printf("\nDéconnexion...\n");
+    }
+
+    close(sc);
+    return 0;
 }
